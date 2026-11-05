@@ -4,7 +4,7 @@ import {
   Service,
 } from 'homebridge';
 import { NanitPlatform } from './platform';
-import { NanitBaby } from './settings';
+import { NanitBaby, babyName } from './nanitApi';
 import { Log, withPrefix } from './log';
 import { StreamingDelegate } from './streaming/delegate';
 import { LocalSource, VideoSource, cloudSource, withFallback } from './streaming/sources';
@@ -57,7 +57,7 @@ export class NanitCamera {
       return cloud;
     }
 
-    const local = new LocalSource(this.platform.rtmpRelay, cameraUid, () => this.platform.getAccessToken(), this.log);
+    const local = new LocalSource(this.platform.rtmpRelay, cameraUid, () => this.platform.auth.token, this.log);
     this.log.info(mode === 'local' ? 'Using local streaming' : 'Using local streaming with cloud fallback');
     return mode === 'local' ? local : withFallback(local, cloud, this.log);
   }
@@ -106,11 +106,11 @@ export class NanitCamera {
   }
 
   private getName(): string {
-    return this.baby.name || this.baby.first_name || 'Nanit Camera';
+    return babyName(this.baby);
   }
 
   private cloudStreamUrl(): string {
-    return `rtmps://media-secured.nanit.com/nanit/${this.baby.uid}.${this.platform.getAccessToken()}`;
+    return `rtmps://media-secured.nanit.com/nanit/${this.baby.uid}.${this.platform.auth.token}`;
   }
 
   public destroy(): void {
