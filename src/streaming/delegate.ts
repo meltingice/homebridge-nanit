@@ -1,5 +1,6 @@
 import { ChildProcess } from 'child_process';
 import {
+  AudioInfo,
   CameraController,
   CameraControllerOptions,
   CameraStreamingDelegate,
@@ -14,11 +15,13 @@ import {
   VideoInfo,
 } from 'homebridge';
 import { Log, errorMessage } from '../log';
-import { SrtpTarget, captureSnapshot, spawnFfmpeg, stopProcess, streamArgs } from './ffmpeg';
+import { AudioEncoder, advertisedCodecs, audioOutputArgs } from './audio';
+import { SrtpTarget, captureSnapshot, inputArgs, spawnFfmpeg, stopProcess, videoOutputArgs } from './ffmpeg';
 import { VideoFeed, VideoSource } from './sources';
 
 interface Session {
-  target: SrtpTarget;
+  video: SrtpTarget;
+  audio: SrtpTarget;
   abort: AbortController;
   feed?: VideoFeed;
   ffmpeg?: ChildProcess;
@@ -33,8 +36,10 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     private readonly log: Log,
     private readonly source: VideoSource,
     private readonly snapshotUrl: () => string,
+    /** Empty when audio is disabled or ffmpeg has no usable encoder. */
+    private readonly audioEncoders: readonly AudioEncoder[],
   ) {
-    this.controller = new hap.CameraController(controllerOptions(hap, this));
+    this.controller = new hap.CameraController(controllerOptions(hap, this, audioEncoders));
   }
 
   async handleSnapshotRequest(request: SnapshotRequest, callback: SnapshotRequestCallback): Promise<void> {
@@ -51,28 +56,17 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   }
 
   prepareStream(request: PrepareStreamRequest, callback: PrepareStreamCallback): void {
-    const { video, audio } = request;
-    const ssrc = this.hap.CameraController.generateSynchronisationSource();
-
-    this.sessions.set(request.sessionID, {
-      target: {
-        address: request.targetAddress,
-        port: video.port,
-        ssrc,
-        srtpParams: Buffer.concat([video.srtp_key, video.srtp_salt]).toString('base64'),
-      },
+    const { targetAddress, video, audio } = request;
+    const session: Session = {
+      video: this.srtpTarget(targetAddress, video),
+      audio: this.srtpTarget(targetAddress, audio),
       abort: new AbortController(),
-    });
+    };
+    this.sessions.set(request.sessionID, session);
 
     callback(undefined, {
-      video: { port: video.port, ssrc, srtp_key: video.srtp_key, srtp_salt: video.srtp_salt },
-      // Audio is advertised but not streamed.
-      audio: {
-        port: audio.port,
-        ssrc: this.hap.CameraController.generateSynchronisationSource(),
-        srtp_key: audio.srtp_key,
-        srtp_salt: audio.srtp_salt,
-      },
+      video: { port: video.port, ssrc: session.video.ssrc, srtp_key: video.srtp_key, srtp_salt: video.srtp_salt },
+      audio: { port: audio.port, ssrc: session.audio.ssrc, srtp_key: audio.srtp_key, srtp_salt: audio.srtp_salt },
     });
   }
 
@@ -85,7 +79,7 @@ export class StreamingDelegate implements CameraStreamingDelegate {
           if (!session) {
             throw new Error(`no prepared session ${id}`);
           }
-          await this.start(id, session, request.video);
+          await this.start(id, session, request.video, request.audio);
           callback();
         } catch (error) {
           if (session?.abort.signal.aborted) {
@@ -117,7 +111,16 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     }
   }
 
-  private async start(id: string, session: Session, video: VideoInfo): Promise<void> {
+  private srtpTarget(address: string, source: PrepareStreamRequest['video']): SrtpTarget {
+    return {
+      address,
+      port: source.port,
+      ssrc: this.hap.CameraController.generateSynchronisationSource(),
+      srtpParams: Buffer.concat([source.srtp_key, source.srtp_salt]).toString('base64'),
+    };
+  }
+
+  private async start(id: string, session: Session, video: VideoInfo, audio: AudioInfo): Promise<void> {
     this.log.info('Starting stream');
     const { signal } = session.abort;
     const feed = await this.source.open(signal);
@@ -128,7 +131,10 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     session.feed = feed;
 
     this.log.info(`Streaming from ${feed.label} source`);
-    const ffmpeg = spawnFfmpeg(streamArgs(feed.url, video, session.target), this.log);
+    const ffmpeg = spawnFfmpeg(
+      [...inputArgs(feed.url), ...videoOutputArgs(video, session.video), ...this.audioArgs(audio, session.audio)],
+      this.log,
+    );
     session.ffmpeg = ffmpeg;
 
     ffmpeg.on('close', (code, signal) => {
@@ -139,6 +145,20 @@ export class StreamingDelegate implements CameraStreamingDelegate {
         this.controller.forceStopStreamingSession(id);
       }
     });
+  }
+
+  /**
+   * HomeKit always negotiates an audio codec; with nothing to offer, HAP
+   * advertises a placeholder. Only stream audio in a codec we can encode.
+   */
+  private audioArgs(audio: AudioInfo, target: SrtpTarget): string[] {
+    const encoder = this.audioEncoders.find(({ codec }) => codec === audio.codec);
+    if (!encoder) {
+      this.log.debug(`Not streaming audio (HomeKit selected ${audio.codec})`);
+      return [];
+    }
+    this.log.info(`Streaming audio as ${encoder.label} ${audio.sample_rate} kHz`);
+    return audioOutputArgs(encoder, audio, target);
   }
 
   /** Tear down a session in any state: preparing, starting, or streaming. */
@@ -156,7 +176,11 @@ export class StreamingDelegate implements CameraStreamingDelegate {
   }
 }
 
-function controllerOptions(hap: HAP, delegate: CameraStreamingDelegate): CameraControllerOptions {
+function controllerOptions(
+  hap: HAP,
+  delegate: CameraStreamingDelegate,
+  audioEncoders: readonly AudioEncoder[],
+): CameraControllerOptions {
   return {
     cameraStreamCount: 2,
     delegate,
@@ -174,9 +198,7 @@ function controllerOptions(hap: HAP, delegate: CameraStreamingDelegate): CameraC
           levels: [hap.H264Level.LEVEL3_1, hap.H264Level.LEVEL3_2, hap.H264Level.LEVEL4_0],
         },
       },
-      audio: {
-        codecs: [{ type: hap.AudioStreamingCodecType.AAC_ELD, samplerate: hap.AudioStreamingSamplerate.KHZ_16 }],
-      },
+      audio: { codecs: advertisedCodecs(audioEncoders) },
     },
   };
 }
