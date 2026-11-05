@@ -40,20 +40,19 @@ export function withFallback(primary: VideoSource, fallback: VideoSource, log: L
   };
 }
 
-interface LocalFeed {
-  url: string;
-  stop(): void;
-}
-
 interface Lease {
-  feed: Promise<LocalFeed>;
+  /** Resolves to the RTMP URL once the camera is publishing. */
+  url: Promise<string>;
   refs: number;
+  /** Aborting ends the feed: cancels startup, or stops a running publish. */
+  lifetime: AbortController;
 }
 
 /**
  * The camera publishes RTMP straight to our relay over the LAN; Nanit's
  * signaling channel tells it where. The camera has a single publish slot, so
- * concurrent viewers share one feed, which is stopped when the last releases it.
+ * concurrent viewers share one feed, which ends when the last one leaves,
+ * including while it is still starting.
  */
 export class LocalSource implements VideoSource {
   private current?: Lease;
@@ -66,59 +65,65 @@ export class LocalSource implements VideoSource {
   ) {}
 
   async open(signal: AbortSignal): Promise<VideoFeed> {
-    const lease = this.current ?? this.newLease(signal);
+    const lease = this.current ?? this.newLease();
     lease.refs++;
 
-    let feed: LocalFeed;
+    let url: string;
     try {
-      feed = await lease.feed;
+      url = await untilAborted(lease.url, signal);
     } catch (error) {
-      lease.refs--;
+      this.leave(lease);
       throw error;
     }
 
     let released = false;
     return {
       label: 'local',
-      url: feed.url,
+      url,
       release: () => {
-        if (released) {
-          return;
-        }
-        released = true;
-        if (--lease.refs === 0) {
-          this.retire(lease);
-          feed.stop();
+        if (!released) {
+          released = true;
+          this.leave(lease);
         }
       },
     };
   }
 
-  private newLease(signal: AbortSignal): Lease {
-    const lease: Lease = { refs: 0, feed: this.startFeed(signal, () => this.retire(lease)) };
-    lease.feed.catch(() => this.retire(lease));
+  private newLease(): Lease {
+    const lifetime = new AbortController();
+    const lease: Lease = { refs: 0, lifetime, url: this.startFeed(lifetime.signal, () => this.retire(lease)) };
+    lease.url.catch(() => this.retire(lease));
     this.current = lease;
     return lease;
   }
 
-  /** Stop handing this lease to new viewers; existing holders keep it until release. */
+  private leave(lease: Lease): void {
+    if (--lease.refs === 0) {
+      this.retire(lease);
+      lease.lifetime.abort(new Error('no viewers left'));
+    }
+  }
+
+  /** Stop handing this lease to new viewers; existing holders keep it until they leave. */
   private retire(lease: Lease): void {
     if (this.current === lease) {
       this.current = undefined;
     }
   }
 
-  private async startFeed(signal: AbortSignal, onEnded: () => void): Promise<LocalFeed> {
+  /** Resolves with the URL once the camera publishes. The feed runs until `signal` aborts. */
+  private async startFeed(signal: AbortSignal, onEnded: () => void): Promise<string> {
     this.relay.start();
     // Alphanumeric only: camera firmware is picky about stream path characters.
     const streamPath = `/live/nanit_${randomBytes(8).toString('hex')}`;
     const url = this.relay.urlFor(streamPath);
 
     const signaling = await CameraSignaling.connect(this.cameraUid, this.accessToken(), this.log, signal);
+    signal.addEventListener('abort', () => signaling.close(), { once: true });
+    const published = this.relay.waitForPublish(streamPath, PUBLISH_TIMEOUT_MS, signal);
+    this.log.debug(`Asking camera to publish to ${redactUrls(url)}`);
+    signaling.startStreaming(url);
     try {
-      const published = this.relay.waitForPublish(streamPath, PUBLISH_TIMEOUT_MS, signal);
-      this.log.debug(`Asking camera to publish to ${redactUrls(url)}`);
-      signaling.startStreaming(url);
       await published;
     } catch (error) {
       signaling.close();
@@ -128,6 +133,18 @@ export class LocalSource implements VideoSource {
     this.log.info('Camera is publishing to the local RTMP server');
     signaling.onClose(onEnded);
     this.relay.onUnpublish(streamPath, onEnded);
-    return { url, stop: () => signaling.close() };
+    return url;
   }
+}
+
+/** `promise`, or a rejection with `signal.reason` if the signal aborts first. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason);
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
 }

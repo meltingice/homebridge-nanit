@@ -75,21 +75,21 @@ export class StreamingDelegate implements CameraStreamingDelegate {
     switch (request.type) {
       case StreamRequestTypes.START: {
         const session = this.sessions.get(id);
+        if (!session) {
+          callback(new Error(`no prepared session ${id}`));
+          return;
+        }
+        // Answer now: HAP fails the request after ~9s, and finding a source can
+        // take longer (the local publish wait, then cloud fallback). HomeKit
+        // keeps waiting for video; if starting fails, we end the session.
+        callback();
         try {
-          if (!session) {
-            throw new Error(`no prepared session ${id}`);
-          }
           await this.start(id, session, request.video, request.audio);
-          callback();
         } catch (error) {
-          if (session?.abort.signal.aborted) {
-            // Stopped while starting; STOP has already cleaned up.
-            callback();
-            return;
+          if (!session.abort.signal.aborted) {
+            this.log.error(`Failed to start stream: ${errorMessage(error)}`);
+            this.endSession(id);
           }
-          this.log.error(`Failed to start stream: ${errorMessage(error)}`);
-          this.stop(id);
-          callback(error as Error);
         }
         return;
       }
@@ -141,10 +141,15 @@ export class StreamingDelegate implements CameraStreamingDelegate {
       this.log.info(`Stream ended (ffmpeg exit=${code}, signal=${signal ?? 'none'})`);
       // If ffmpeg died on its own, tell HomeKit rather than leave a frozen stream.
       if (this.sessions.get(id) === session) {
-        this.stop(id);
-        this.controller.forceStopStreamingSession(id);
+        this.endSession(id);
       }
     });
+  }
+
+  /** End a session from our side: tear it down and tell HomeKit. */
+  private endSession(id: string): void {
+    this.stop(id);
+    this.controller.forceStopStreamingSession(id);
   }
 
   /**
