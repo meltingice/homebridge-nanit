@@ -62,7 +62,7 @@ export class RtmpRelay {
     if (signal.aborted) {
       return Promise.reject(signal.reason);
     }
-    if (this.publishers.has(streamPath)) {
+    if (this.isPublishing(streamPath)) {
       return Promise.resolve();
     }
 
@@ -88,6 +88,10 @@ export class RtmpRelay {
       this.events.on(event, onPublish);
       signal.addEventListener('abort', onAbort, { once: true });
     });
+  }
+
+  isPublishing(streamPath: string): boolean {
+    return this.publishers.has(streamPath);
   }
 
   /** Cut off whoever is publishing to `streamPath`, if anyone. */

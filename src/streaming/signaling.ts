@@ -18,7 +18,7 @@ interface PendingRequest {
  */
 export class CameraSignaling {
   private nextRequestId = 1;
-  private closing = false;
+  private closed?: Promise<void>;
   private readonly pending = new Map<number, PendingRequest>();
 
   private constructor(private readonly ws: WebSocket, log: Log) {
@@ -85,17 +85,21 @@ export class CameraSignaling {
 
   /**
    * Ask the camera to stop publishing and close once it acknowledges (or
-   * doesn't, within a couple of seconds). Safe to call more than once.
+   * doesn't, within a couple of seconds). Resolves when the stop is settled.
+   * Safe to call more than once.
    */
-  close(): void {
-    if (this.closing) {
-      return;
+  close(): Promise<void> {
+    if (!this.closed) {
+      this.closed = this.stopAndClose();
     }
-    this.closing = true;
-    const stopped = this.ws.readyState === WebSocket.OPEN
-      ? this.request(StreamingStatus.STOPPED, '', AbortSignal.timeout(STOP_ACK_TIMEOUT_MS)).catch(() => undefined)
-      : Promise.resolve(undefined);
-    void stopped.then(() => this.ws.close());
+    return this.closed;
+  }
+
+  private async stopAndClose(): Promise<void> {
+    if (this.ws.readyState === WebSocket.OPEN) {
+      await this.request(StreamingStatus.STOPPED, '', AbortSignal.timeout(STOP_ACK_TIMEOUT_MS)).catch(() => undefined);
+    }
+    this.ws.close();
   }
 
   onClose(listener: () => void): void {

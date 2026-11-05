@@ -1,10 +1,13 @@
 import { randomBytes } from 'crypto';
+import { setTimeout as sleep } from 'timers/promises';
 import { Log, errorMessage } from '../log';
 import { redactUrls } from './ffmpeg';
 import { RtmpRelay } from './rtmpRelay';
 import { CameraSignaling } from './signaling';
 
 const PUBLISH_TIMEOUT_MS = 12_000;
+/** How long the camera gets to hang up after acknowledging STOPPED before we cut it off. */
+const UNPUBLISH_GRACE_MS = 5_000;
 
 /** A live input ffmpeg can read from. `release()` must be called exactly once when done. */
 export interface VideoFeed {
@@ -119,17 +122,13 @@ export class LocalSource implements VideoSource {
     const url = this.relay.urlFor(streamPath);
 
     const signaling = await CameraSignaling.connect(this.cameraUid, this.accessToken(), this.log, signal);
-    // Ask the camera to stop, and don't rely on it: also drop its connection.
-    signal.addEventListener('abort', () => {
-      signaling.close();
-      this.relay.disconnect(streamPath);
-    }, { once: true });
+    signal.addEventListener('abort', () => void this.stopFeed(signaling, streamPath), { once: true });
     try {
       this.log.debug(`Asking camera to publish to ${redactUrls(url)}`);
       await signaling.startStreaming(url, signal);
       await this.relay.waitForPublish(streamPath, PUBLISH_TIMEOUT_MS, signal);
     } catch (error) {
-      signaling.close();
+      void this.stopFeed(signaling, streamPath);
       throw error;
     }
 
@@ -137,6 +136,21 @@ export class LocalSource implements VideoSource {
     signaling.onClose(onEnded);
     this.relay.onUnpublish(streamPath, onEnded);
     return url;
+  }
+
+  /**
+   * Ask the camera to stop, and only cut its RTMP connection if it keeps
+   * publishing anyway: dropping it first makes the camera reconnect.
+   */
+  private async stopFeed(signaling: CameraSignaling, streamPath: string): Promise<void> {
+    await signaling.close();
+    if (this.relay.isPublishing(streamPath)) {
+      await sleep(UNPUBLISH_GRACE_MS);
+    }
+    if (this.relay.isPublishing(streamPath)) {
+      this.log.warn('Camera kept publishing after being told to stop; disconnecting it');
+      this.relay.disconnect(streamPath);
+    }
   }
 }
 
