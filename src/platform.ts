@@ -17,11 +17,14 @@ import {
   NanitBaby,
 } from './settings';
 import { NanitCamera } from './camera';
+import { withPrefix } from './log';
+import { RtmpRelay } from './streaming/rtmpRelay';
 
 export class NanitPlatform implements DynamicPlatformPlugin {
   public readonly log: Logger;
   public readonly config: NanitPlatformConfig;
   public readonly api: API;
+  public readonly rtmpRelay: RtmpRelay;
 
   private readonly accessories: PlatformAccessory[] = [];
   private readonly cameras: Map<string, NanitCamera> = new Map();
@@ -30,7 +33,6 @@ export class NanitPlatform implements DynamicPlatformPlugin {
   private refreshToken?: string;
   private refreshInterval?: NodeJS.Timeout;
   private discoveryInterval?: NodeJS.Timeout;
-  private rtmpPortCounter = 0;
   private authFailures = 0;
   private authDisabled = false;
 
@@ -38,6 +40,8 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     this.log = log;
     this.config = config as NanitPlatformConfig;
     this.api = api;
+    // Started lazily, the first time a camera streams locally.
+    this.rtmpRelay = new RtmpRelay(withPrefix(log, 'RTMP'), this.config.localRtmpPort ?? 1935, this.config.localAddress);
 
     // Validate config
     if (!this.config.email) {
@@ -334,10 +338,6 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     return this.accessToken;
   }
 
-  allocateRtmpPort(): number {
-    return (this.config.localRtmpPort || 1935) + this.rtmpPortCounter++;
-  }
-
   // Platform shutdown cleanup
   shutdown(): void {
     this.log.info('Shutting down Nanit platform');
@@ -354,9 +354,7 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     
     // Cleanup all cameras
     for (const camera of this.cameras.values()) {
-      if ((camera as any).destroy) {
-        (camera as any).destroy();
-      }
+      camera.destroy();
     }
     
     this.cameras.clear();
