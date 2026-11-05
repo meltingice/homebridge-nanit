@@ -104,9 +104,7 @@ export class NanitPlatform implements DynamicPlatformPlugin {
     const uuid = this.api.hap.uuid.generate(baby.uid);
     const name = babyName(baby);
     const camera = this.cameras.get(uuid);
-    if (camera) {
-      camera.updateSensors(baby.camera?.temperature, baby.camera?.humidity);
-    }
+    camera?.update(baby);
 
     const cached = this.accessories.get(uuid);
     if (cached) {

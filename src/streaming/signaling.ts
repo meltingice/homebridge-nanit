@@ -1,5 +1,5 @@
 import WebSocket from 'ws';
-import { client } from '../nanit.proto';
+import { StreamingStatus, decodeResponse, encodePutStreaming } from './protocol';
 import { Log, errorMessage } from '../log';
 
 const HANDSHAKE_TIMEOUT_MS = 10_000;
@@ -44,7 +44,7 @@ export class CameraSignaling {
       ws.on('close', () => log.debug('Signaling closed'));
       ws.on('message', (data: Buffer) => {
         try {
-          const { response } = client.Message.decode(data);
+          const response = decodeResponse(data);
           if (response) {
             log.debug(`Signaling response ${response.requestId}: ${response.statusCode} ${response.statusMessage ?? ''}`);
           }
@@ -56,30 +56,18 @@ export class CameraSignaling {
   }
 
   startStreaming(rtmpUrl: string): void {
-    this.putStreaming(client.Streaming.Status.STARTED, rtmpUrl);
+    this.ws.send(encodePutStreaming(this.nextRequestId++, StreamingStatus.STARTED, rtmpUrl));
   }
 
   /** Ask the camera to stop publishing, then close. Safe to call more than once. */
   close(): void {
     if (this.ws.readyState === WebSocket.OPEN) {
-      this.putStreaming(client.Streaming.Status.STOPPED, '');
+      this.ws.send(encodePutStreaming(this.nextRequestId++, StreamingStatus.STOPPED, ''));
     }
     this.ws.close();
   }
 
   onClose(listener: () => void): void {
     this.ws.once('close', listener);
-  }
-
-  private putStreaming(status: client.Streaming.Status, rtmpUrl: string): void {
-    const message = client.Message.encode({
-      type: client.Message.Type.REQUEST,
-      request: {
-        id: this.nextRequestId++,
-        type: client.RequestType.PUT_STREAMING,
-        streaming: { id: client.StreamIdentifier.MOBILE, status, rtmpUrl },
-      },
-    });
-    this.ws.send(message.finish());
   }
 }

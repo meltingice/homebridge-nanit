@@ -1,10 +1,14 @@
 import {
+  Characteristic,
   HAP,
   PlatformAccessory,
   Service,
+  WithUUID,
 } from 'homebridge';
+
+type SensorService = typeof Service.TemperatureSensor | typeof Service.HumiditySensor;
 import { NanitPlatform } from './platform';
-import { NanitBaby, babyName } from './nanitApi';
+import { NanitBaby, NanitCameraInfo, babyName } from './nanitApi';
 import { Log, withPrefix } from './log';
 import { StreamingDelegate } from './streaming/delegate';
 import { LocalSource, VideoSource, cloudSource, withFallback } from './streaming/sources';
@@ -13,17 +17,15 @@ export class NanitCamera {
   private readonly hap: HAP;
   private readonly log: Log;
   private readonly streamingDelegate: StreamingDelegate;
-
-  private temperatureService?: Service;
-  private humidityService?: Service;
+  private readonly sensorRefreshers: Array<() => void> = [];
 
   constructor(
     private readonly platform: NanitPlatform,
     private readonly accessory: PlatformAccessory,
-    private readonly baby: NanitBaby,
+    private baby: NanitBaby,
   ) {
     this.hap = platform.api.hap;
-    this.log = withPrefix(platform.log, this.getName());
+    this.log = withPrefix(platform.log, babyName(baby));
 
     this.accessory
       .getService(this.hap.Service.AccessoryInformation)!
@@ -40,7 +42,20 @@ export class NanitCamera {
     );
     this.accessory.configureController(this.streamingDelegate.controller);
 
-    this.setupSensors();
+    const { Service: S, Characteristic: C } = this.hap;
+    this.addSensor(S.TemperatureSensor, 'Temperature', C.CurrentTemperature, (camera) => camera.temperature);
+    this.addSensor(S.HumiditySensor, 'Humidity', C.CurrentRelativeHumidity, (camera) => camera.humidity);
+  }
+
+  /** Apply fresh data from the Nanit API. */
+  update(baby: NanitBaby): void {
+    this.baby = baby;
+    this.sensorRefreshers.forEach((refresh) => refresh());
+  }
+
+  destroy(): void {
+    this.log.debug('Cleaning up camera');
+    this.streamingDelegate.destroy();
   }
 
   private videoSource(): VideoSource {
@@ -62,59 +77,30 @@ export class NanitCamera {
     return mode === 'local' ? local : withFallback(local, cloud, this.log);
   }
 
-  private setupSensors(): void {
-    const camera = this.baby.camera;
-    if (!camera) {
+  /** Expose a sensor reading, if the camera reports it. Reads always reflect the latest `update`. */
+  private addSensor(
+    serviceType: SensorService,
+    label: string,
+    characteristicType: WithUUID<new () => Characteristic>,
+    read: (camera: NanitCameraInfo) => number | undefined,
+  ): void {
+    const value = () => (this.baby.camera ? read(this.baby.camera) : undefined);
+    if (value() === undefined) {
       return;
     }
 
-    // Temperature sensor
-    if (camera.temperature !== undefined) {
-      this.temperatureService =
-        this.accessory.getService(this.hap.Service.TemperatureSensor) ||
-        this.accessory.addService(this.hap.Service.TemperatureSensor, `${this.getName()} Temperature`);
-
-      this.temperatureService
-        .getCharacteristic(this.hap.Characteristic.CurrentTemperature)
-        .onGet(() => camera.temperature || 0);
-    }
-
-    // Humidity sensor
-    if (camera.humidity !== undefined) {
-      this.humidityService =
-        this.accessory.getService(this.hap.Service.HumiditySensor) ||
-        this.accessory.addService(this.hap.Service.HumiditySensor, `${this.getName()} Humidity`);
-
-      this.humidityService
-        .getCharacteristic(this.hap.Characteristic.CurrentRelativeHumidity)
-        .onGet(() => camera.humidity || 0);
-    }
-  }
-
-  public updateSensors(temperature?: number, humidity?: number): void {
-    if (temperature !== undefined && this.temperatureService) {
-      this.temperatureService
-        .getCharacteristic(this.hap.Characteristic.CurrentTemperature)
-        .updateValue(temperature);
-    }
-
-    if (humidity !== undefined && this.humidityService) {
-      this.humidityService
-        .getCharacteristic(this.hap.Characteristic.CurrentRelativeHumidity)
-        .updateValue(humidity);
-    }
-  }
-
-  private getName(): string {
-    return babyName(this.baby);
+    const service = this.accessory.getService(serviceType)
+      ?? this.accessory.addService(serviceType, `${babyName(this.baby)} ${label}`);
+    const characteristic = service.getCharacteristic(characteristicType).onGet(() => value() ?? 0);
+    this.sensorRefreshers.push(() => {
+      const current = value();
+      if (current !== undefined) {
+        characteristic.updateValue(current);
+      }
+    });
   }
 
   private cloudStreamUrl(): string {
     return `rtmps://media-secured.nanit.com/nanit/${this.baby.uid}.${this.platform.auth.token}`;
-  }
-
-  public destroy(): void {
-    this.log.debug('Cleaning up camera');
-    this.streamingDelegate.destroy();
   }
 }
