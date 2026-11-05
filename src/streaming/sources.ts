@@ -120,11 +120,10 @@ export class LocalSource implements VideoSource {
 
     const signaling = await CameraSignaling.connect(this.cameraUid, this.accessToken(), this.log, signal);
     signal.addEventListener('abort', () => signaling.close(), { once: true });
-    const published = this.relay.waitForPublish(streamPath, PUBLISH_TIMEOUT_MS, signal);
-    this.log.debug(`Asking camera to publish to ${redactUrls(url)}`);
-    signaling.startStreaming(url);
     try {
-      await published;
+      this.log.debug(`Asking camera to publish to ${redactUrls(url)}`);
+      await signaling.startStreaming(url, signal);
+      await this.relay.waitForPublish(streamPath, PUBLISH_TIMEOUT_MS, signal);
     } catch (error) {
       signaling.close();
       throw error;

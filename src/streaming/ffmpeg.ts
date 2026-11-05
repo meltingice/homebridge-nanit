@@ -71,7 +71,7 @@ export function spawnFfmpeg(args: string[], log: Log): ChildProcessWithoutNullSt
 export function captureSnapshot(inputUrl: string, log: Log): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const proc = spawnFfmpeg(
-      [...inputArgs(inputUrl), '-frames:v', '1', '-f', 'image2', '-'],
+      [...inputArgs(inputUrl), '-frames:v', '1', '-update', '1', '-f', 'image2', '-'],
       log,
     );
     const chunks: Buffer[] = [];

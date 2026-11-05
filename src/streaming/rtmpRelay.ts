@@ -55,10 +55,7 @@ export class RtmpRelay {
     this.log.info(`Local RTMP server listening on port ${this.port}`);
   }
 
-  /**
-   * Resolve once something publishes to `streamPath`. Call this *before*
-   * asking the camera to publish so the event can't be missed.
-   */
+  /** Resolve once something is publishing to `streamPath`, immediately if it already is. */
   waitForPublish(streamPath: string, timeoutMs: number, signal: AbortSignal): Promise<void> {
     if (signal.aborted) {
       return Promise.reject(signal.reason);
