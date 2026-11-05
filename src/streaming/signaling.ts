@@ -19,6 +19,8 @@ interface PendingRequest {
 export class CameraSignaling {
   private nextRequestId = 1;
   private closed?: Promise<void>;
+  /** Where the camera was asked to publish; STOPPED must name the same URL. */
+  private rtmpUrl?: string;
   private readonly pending = new Map<number, PendingRequest>();
 
   private constructor(private readonly ws: WebSocket, log: Log) {
@@ -77,6 +79,7 @@ export class CameraSignaling {
 
   /** Ask the camera to publish to `rtmpUrl`. Rejects if the camera declines or doesn't answer. */
   async startStreaming(rtmpUrl: string, signal: AbortSignal): Promise<void> {
+    this.rtmpUrl = rtmpUrl;
     const { statusCode, statusMessage } = await this.request(StreamingStatus.STARTED, rtmpUrl, signal);
     if (statusCode < 200 || statusCode >= 300) {
       throw new Error(`camera declined to stream (${statusCode} ${statusMessage ?? ''})`);
@@ -84,9 +87,9 @@ export class CameraSignaling {
   }
 
   /**
-   * Ask the camera to stop publishing and close once it acknowledges (or
-   * doesn't, within a couple of seconds). Resolves when the stop is settled.
-   * Safe to call more than once.
+   * Ask the camera to stop publishing (if it was asked to start) and close
+   * once it acknowledges, or doesn't within a couple of seconds. Resolves when
+   * the stop is settled. Safe to call more than once.
    */
   close(): Promise<void> {
     if (!this.closed) {
@@ -96,8 +99,9 @@ export class CameraSignaling {
   }
 
   private async stopAndClose(): Promise<void> {
-    if (this.ws.readyState === WebSocket.OPEN) {
-      await this.request(StreamingStatus.STOPPED, '', AbortSignal.timeout(STOP_ACK_TIMEOUT_MS)).catch(() => undefined);
+    // The camera matches STOPPED to a stream by URL: an empty one is acknowledged but stops nothing.
+    if (this.rtmpUrl !== undefined && this.ws.readyState === WebSocket.OPEN) {
+      await this.request(StreamingStatus.STOPPED, this.rtmpUrl, AbortSignal.timeout(STOP_ACK_TIMEOUT_MS)).catch(() => undefined);
     }
     this.ws.close();
   }
