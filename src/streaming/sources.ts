@@ -119,7 +119,11 @@ export class LocalSource implements VideoSource {
     const url = this.relay.urlFor(streamPath);
 
     const signaling = await CameraSignaling.connect(this.cameraUid, this.accessToken(), this.log, signal);
-    signal.addEventListener('abort', () => signaling.close(), { once: true });
+    // Ask the camera to stop, and don't rely on it: also drop its connection.
+    signal.addEventListener('abort', () => {
+      signaling.close();
+      this.relay.disconnect(streamPath);
+    }, { once: true });
     try {
       this.log.debug(`Asking camera to publish to ${redactUrls(url)}`);
       await signaling.startStreaming(url, signal);

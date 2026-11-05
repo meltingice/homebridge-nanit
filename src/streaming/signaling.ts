@@ -4,6 +4,8 @@ import { Log, errorMessage } from '../log';
 
 const HANDSHAKE_TIMEOUT_MS = 10_000;
 const RESPONSE_TIMEOUT_MS = 10_000;
+/** How long close() waits for the camera to acknowledge STOPPED before hanging up. */
+const STOP_ACK_TIMEOUT_MS = 2_000;
 
 interface PendingRequest {
   resolve(response: SignalingResponse): void;
@@ -16,6 +18,7 @@ interface PendingRequest {
  */
 export class CameraSignaling {
   private nextRequestId = 1;
+  private closing = false;
   private readonly pending = new Map<number, PendingRequest>();
 
   private constructor(private readonly ws: WebSocket, log: Log) {
@@ -80,12 +83,19 @@ export class CameraSignaling {
     }
   }
 
-  /** Ask the camera to stop publishing, then close. Safe to call more than once. */
+  /**
+   * Ask the camera to stop publishing and close once it acknowledges (or
+   * doesn't, within a couple of seconds). Safe to call more than once.
+   */
   close(): void {
-    if (this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(encodePutStreaming(this.nextRequestId++, StreamingStatus.STOPPED, ''));
+    if (this.closing) {
+      return;
     }
-    this.ws.close();
+    this.closing = true;
+    const stopped = this.ws.readyState === WebSocket.OPEN
+      ? this.request(StreamingStatus.STOPPED, '', AbortSignal.timeout(STOP_ACK_TIMEOUT_MS)).catch(() => undefined)
+      : Promise.resolve(undefined);
+    void stopped.then(() => this.ws.close());
   }
 
   onClose(listener: () => void): void {
